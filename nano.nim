@@ -1,4 +1,4 @@
-import httpclient, json, re, strutils, uri
+import httpclient, json, re, std/options, strutils, uri
 
 # Port of couchdb-nano
 
@@ -75,25 +75,25 @@ type
     sizes                * : Sizes
     update_seq           * : string
   
-  #Document     * = object of RootObj
-  #  id         * : string
-  #  key        * : string
-  #  value      * : JsonNode ## Object structure: { rev : string }
+  Document     * = object of RootObj
+   `"_id"`     * : string
+   `"_key"`    * : Option[string]
+   value       * : Option[JsonNode] ## Object structure: { rev : string }
 
-  #DocumentGetResponse * = ref object of RootObj
-  #  ##[
-  #    Document response: 
-  #    http://docs.couchdb.org/en/latest/api/document/common.html#get--db-docid
-  #  ]## 
-  #  id                * : string        ## Document ID.
-  #  rev               * : string        ## Revision MVCC token.
-  #  deleted           * : bool          ## Deletion flag. Available if document was removed.
-  #  attachments       * : JsonNode      ## Attachment's stubs. Available if document has any attachments.
-  #  conflicts         * : seq[JsonNode] ## List of conflicted revisions. Available if requested with conflicts=true query parameter.
-  #  deleted_conflicts * : seq[JsonNode] ## List of deleted conflicted revisions. Available if requested with deleted_conflicts=true query parameter.
-  #  local_seq         * : string        ## Document's update sequence in current database. Available if requested with local_seq=true query parameter.
-  #  revs_info         * : seq[JsonNode] ## List of objects with information about local revisions and their status. Available if requested with open_revs query parameter.
-  #  revisions         * : JsonNode      ## List of local revision tokens without. Available if requested with revs=true query parameter.
+  DocumentGetResponse      * = ref object of RootObj
+    ##[
+     Document response: 
+     http://docs.couchdb.org/en/latest/api/document/common.html#get--db-docid
+    ]## 
+    `"_id"`                * : string                ## Document ID.
+    `"_rev"`               * : string                ## Revision MVCC token.
+    `"_deleted"`           * : Option[bool]          ## Deletion flag. Available if document was removed.
+    `"_attachments"`       * : Option[JsonNode]      ## Attachment's stubs. Available if document has any attachments.
+    `"_conflicts"`         * : Option[seq[JsonNode]] ## List of conflicted revisions. Available if requested with conflicts=true query parameter.
+    `"_deleted_conflicts"` * : Option[seq[JsonNode]] ## List of deleted conflicted revisions. Available if requested with deleted_conflicts=true query parameter.
+    `"_local_seq"`         * : Option[string]        ## Document's update sequence in current database. Available if requested with local_seq=true query parameter.
+    `"_revs_info"`         * : Option[seq[JsonNode]] ## List of objects with information about local revisions and their status. Available if requested with open_revs query parameter.
+    `"_revisions"`         * : Option[JsonNode]      ## List of local revision tokens without. Available if requested with revs=true query parameter.
   
   DocumentListResponse * = ref object
     ##[
@@ -110,6 +110,15 @@ type
     ok                   * : bool
     rev                  * : string
 
+  DocumentDestroyResponse * = ref object
+    ##[
+      Document delete response.
+      http://docs.couchdb.org/en/latest/api/document/common.html#delete--db-docid
+    ]##
+    id                    * : string ## Document ID
+    ok                    * : bool   ## Operation status
+    rev                   * : string ## Revision MVCC token
+  
   InfoResponse * = ref object
     ## CouchDB status and welcome response.
     couchdb    * : string
@@ -124,6 +133,12 @@ template `$`(connection: Connection): string =
   #uri.username = connection.username
   #uri.password = connection.password
   $uri
+
+template `/`(connection: Connection, path: string): string =
+  connection.location & "/" & path
+
+template `/`(a, b: string): string =
+  a & "/" & b
 
 template `$`*(info: InfoResponse): string = $(%*info)
   ## JSON representation of InfoResponse.
@@ -209,7 +224,7 @@ proc info*(connection: Connection): InfoResponse =
 proc authenticate(connection: Connection): string =
   ## Execute `POST /_session`.
   ## Authenticate user and returns session cookie. This method uses the JSON approach.
-  let path = $connection.location & "/_session"
+  let path = connection / "_session"
   logDebug("POST " & path)
   let response = client.post(path, $(%*{ "name": connection.username, "password": connection.password }))
   case response.status
@@ -227,7 +242,7 @@ proc authenticate(connection: Connection): string =
 proc list*(connection: Connection): seq[string] =
   ## Execute `GET /_all_dbs`.
   ## Returns list of databases in the instance.
-  let response = get($connection & "/_all_dbs")
+  let response = get(connection / "_all_dbs")
   to(parseJson(response.body), seq[string])
 
 proc create*(connection: Connection; name: string): Database =
@@ -235,8 +250,8 @@ proc create*(connection: Connection; name: string): Database =
   ## Create new database using provided name.
   if re.match(name, re"^[a-z][a-z0-9_$()+/-]*$"):
     let token = authenticate(connection)
-    let temp = connection.location & "/" & name
-    let response = client(token).put(temp, "")
+    let path = connection / name
+    let response = client(token).put(path, "")
     case response.status
     of $Http200, $Http201, $Http202:
       result = newDatabase(connection, name)
@@ -260,18 +275,21 @@ proc create*(connection: Connection; name: string): Database =
 proc connect*(connection: Connection, name: string): Database =
   ## Execute `HEAD {db}`.
   ## Checks for existence of database and returns it if it exists.
-  let response = head($connection & "/" & name)
+  let path = connection / name
+  let response = head(path)
   case response.status
   of $Http200:
+    echo "200 - OK"
     result = newDatabase(connection, name)
   of $Http404:
+    echo "404 - Not Found"
     result = nil
   else:
     result = nil
 
 proc get*(db: Database): DatabaseGetResponse =
   ## Execute `GET {db}`
-  let response = get($db.connection & "/" & db.name)
+  let response = get(db.connection / db.name)
   case response.status
   of $Http200:
     result = to(parseJson(response.body), DatabaseGetResponse) 
@@ -281,7 +299,8 @@ proc get*(db: Database): DatabaseGetResponse =
 proc destroy*(db: Database) =
   ## Execute `DELETE /{db}`
   let token = authenticate(db.connection)
-  let response = client(token).delete($db.connection & "/" & db.name)
+  let path = db.connection / db.name
+  let response = client(token).delete(path)
   case response.status
   of $Http200, $Http202:
     echo "200, 202"
@@ -301,7 +320,8 @@ proc destroy*(db: Database) =
 proc list*(db: Database): DocumentListResponse =
   ## Execute `GET {db}/_all_docs`
   # TODO: parameters
-  let response = get($db.connection & "/" & db.name & "/_all_docs")
+  let path = db.connection / db.name / "_all_docs"
+  let response = get(path)
   case response.status
   of $Http200:
     result = to(parseJson(response.body), DocumentListResponse)
@@ -311,16 +331,21 @@ proc list*(db: Database): DocumentListResponse =
 proc get*(db: Database, id: string): JsonNode =
   ## Execute `GET {db}/{docid}`.
   # TODO: parameters
-  let response = get($db.connection & "/" & db.name & "/" & id)
+  let token = authenticate(db.connection)
+  let path = db.connection / db.name / id
+  let response = client(token).get(path)
   case response.status
   of $Http200:
+    logDebug "200 - OK"
     result = parseJson(response.body)
   else:
+    logDebug response.status
     result = nil
 
 proc insert*(db: Database, doc: string): DocumentInsertResponse =
   # TODO: parameters
-  let response = post($db.connection & "/" & db.name, doc)
+  let path = db.connection / db.name
+  let response = post(path, doc)
   case response.status
   of $Http200, $Http201, $Http202:
     result = to(parseJson(response.body), DocumentInsertResponse)
@@ -341,7 +366,7 @@ proc insert*(db: Database, doc: string): DocumentInsertResponse =
 
 proc destroy*(db: Database, id, rev: string) =
   ## Remove document from database.
-  let path = $db.connection & "/" & db.name & "/" & id & "?rev=" & rev
+  let path = db.connection / db.name / id / "?rev=" & rev
   logDebug("DELETE " & path)
   let response = client.delete(path)
   case response.status
