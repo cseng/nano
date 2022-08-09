@@ -24,12 +24,26 @@ proc example2(): JsonNode =
   let db = connect(connection, exampleName)
   if db == nil:
     raise newException(Exception, "Could not get " & exampleName)
-  let doc = get(db, docId)
-  if doc == nil:
+  let doc1 = get(db, docId)
+  if doc1 == nil:
     raise newException(Exception, "Could not get document " & docId)
   else:
-    echo "id: ", doc{"_id"}.getStr(), " key: ", doc{"key"}.getStr()
-    result = doc
+    echo "id: ", doc1{"_id"}.getStr(), " key: ", doc1{"key"}.getStr()
+    docId = doc1{"_id"}.getStr()
+  let info = head(db, docId)
+  if info == nil:
+    raise newException(Exception, "Could not get " & docId)
+  else:
+    echo "id: ", info.id, " length: ", info.length, " rev: ", info.rev
+  var params = newSeq[(string, string)]()
+  add(params, ("revs", $true))
+  let doc2 = get(db, docId, params)
+  if doc2 == nil:
+    raise newException(Exception, "Could not get " & docId)
+  else:
+    #echo "id: ", doc.id, " rev: ", doc.rev
+    echo $doc2
+  result = doc2
 
 proc example3(doc: JsonNode) =
   # Removes the document created in example2 and finally removes the database

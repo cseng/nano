@@ -80,10 +80,20 @@ type
    `"_key"`    * : Option[string]
    value       * : Option[JsonNode] ## Object structure: { rev : string }
 
+  DocumentHeadResponse     * = ref object of RootObj
+    ##[
+      Document response: 
+      http://docs.couchdb.org/en/latest/api/document/common.html#get--db-docid
+    ]## 
+    id                     * : string
+    length                 * : int
+    rev                    * : string
+    
+
   DocumentGetResponse      * = ref object of RootObj
     ##[
-     Document response: 
-     http://docs.couchdb.org/en/latest/api/document/common.html#get--db-docid
+      Document response: 
+      http://docs.couchdb.org/en/latest/api/document/common.html#get--db-docid
     ]## 
     `"_id"`                * : string                ## Document ID.
     `"_rev"`               * : string                ## Revision MVCC token.
@@ -106,6 +116,10 @@ type
     total_rows         * : int
 
   DocumentInsertResponse * = ref object
+    ##[
+      Document insert response.
+      http://docs.couchdb.org/en/latest/api/document/common.html#insert--db-docid
+    ]##
     id                   * : string
     ok                   * : bool
     rev                  * : string
@@ -166,6 +180,13 @@ func newDatabase(connection: Connection, name: string): Database =
   Database(
     connection : connection,
     name       : name
+  )
+
+func newDocumentHeadResponse(id: string, length: int, rev: string): DocumentHeadResponse =
+  DocumentHeadResponse(
+    id     : id,
+    length : if length < 0: 0 else: length,
+    rev    : rev
   )
 
 #func newDocumentGetResponse(node: JsonNode): DocumentGetResponse =
@@ -231,10 +252,10 @@ proc authenticate(connection: Connection): string =
   of $Http200:
     result = response.headers["Set-Cookie"]
   of $Http302:
-    echo "302"
+    logDebug "302"
     discard
   of $Http401:
-    echo "401"
+    logDebug "401"
     discard
   else:
     raise newException(Exception, "Unable to authenticate")
@@ -256,16 +277,16 @@ proc create*(connection: Connection; name: string): Database =
     of $Http200, $Http201, $Http202:
       result = newDatabase(connection, name)
     of $Http400:
-      echo "400"
+      logDebug "400"
       discard
     of $Http401:
-      echo "401"
+      logDebug "401"
       discard
     of $Http404:
-      echo "404"
+      logDebug "404"
       discard
     of $Http412:
-      echo "412"
+      logDebug "412"
       discard
     else:
       raise newException(Exception, "Unable to create database: " & name)
@@ -279,10 +300,10 @@ proc connect*(connection: Connection, name: string): Database =
   let response = head(path)
   case response.status
   of $Http200:
-    echo "200 - OK"
+    logDebug "200 - OK"
     result = newDatabase(connection, name)
   of $Http404:
-    echo "404 - Not Found"
+    logDebug "404 - Not Found"
     result = nil
   else:
     result = nil
@@ -303,16 +324,16 @@ proc destroy*(db: Database) =
   let response = client(token).delete(path)
   case response.status
   of $Http200, $Http202:
-    echo "200, 202"
+    logDebug "200, 202"
     discard
   of $Http400:
-    echo "400"
+    logDebug "400"
     discard
   of $Http401:
-    echo "401"
+    logDebug "401"
     discard
   of $Http404:
-    echo "404"
+    logDebug "404"
     discard
   else:
     raise newException(Exception, "Unable to delete database: " & db.name)
@@ -324,20 +345,55 @@ proc list*(db: Database): DocumentListResponse =
   let response = get(path)
   case response.status
   of $Http200:
+    logDebug "200 OK"        # Requested completed successfully
     result = to(parseJson(response.body), DocumentListResponse)
+  of $Http404:
+    logDebug "404 Not Found" # Requested database not found
   else:
     result = nil
 
-proc get*(db: Database, id: string): JsonNode =
-  ## Execute `GET {db}/{docid}`.
-  # TODO: parameters
+proc get*(db: Database, id: string, parameters: seq[(string, string)] = newSeq[(string, string)]()): JsonNode =
+  ##[
+    Execute `GET {db}/{docid}`.
+  
+    http://docs.couchdb.org/en/latest/api/document/common.html#get--db-docid
+  
+    Parameters are implemented as a list of tuples; no special type provided.
+  
+    - **attachments**       - Includes attachments bodies in response. Default is false
+    - **att_encoding_info** - Includes encoding information in attachment stubs if the particular attachment is compressed. Default is false.
+    - **atts_since**        - Includes attachments only since specified revisions. Doesn't includes attachments for specified revisions. Optional
+    - **conflicts**         - Includes information about conflicts in document. Default is false
+    - **deleted_conflicts** - Includes information about deleted conflicted revisions. Default is false
+    - **latest**            - Forces retrieving latest 'leaf' revision, no matter what rev was requested. Default is false
+    - **local_seq**         - Includes last update sequence for the document. Default is false
+    - **meta**              - Acts same as specifying all conflicts, deleted_conflicts and revs_info query parameters. Default is false
+    - **open_revs**         - Retrieves documents of specified leaf revisions. Additionally, it accepts value as all to return all leaf revisions. Optional
+    - **rev**               - Retrieves document of specified revision. Optional
+    - **revs**              - Includes list of all known document revisions. Default is false
+    - **revs_info**         - Includes detailed information for all known document revisions. Default is false
+  ]##
   let token = authenticate(db.connection)
-  let path = db.connection / db.name / id
+  var path = ""
+  if len(parameters) > 0:
+    let query = encodeQuery(parameters)
+    path = db.connection / db.name / id & "?" & query
+  else:
+    path = db.connection / db.name / id
+  logDebug(path)
   let response = client(token).get(path)
   case response.status
   of $Http200:
-    logDebug "200 - OK"
+    logDebug "200 OK"           # Request completed successfully
     result = parseJson(response.body)
+  of $Http304:
+    logDebug "304 Not Modified" # Document wasn�t modified since specified revision
+  of $Http400:
+    logDebug "400 Bad Request"  # The format of the request or revision was invalid
+  of $Http401:
+    logDebug "401 Unauthorized" # Read privilege required
+  of $Http404:
+    logDebug "404 Not Found"    # Document not found
   else:
     logDebug response.status
     result = nil
@@ -350,17 +406,13 @@ proc insert*(db: Database, doc: string): DocumentInsertResponse =
   of $Http200, $Http201, $Http202:
     result = to(parseJson(response.body), DocumentInsertResponse)
   of $Http400:
-    logDebug "400 - Bad Request" # Invalid database name
-    discard
+    logDebug "400 Bad Request"  # Invalid database name
   of $Http401:
-    logDebug "401 - Unauthorized" # Write permissions needed
-    discard
+    logDebug "401 Unauthorized" # Write permissions needed
   of $Http404:
-    logDebug "404 - Not Found" # Database doesn't exist
-    discard
+    logDebug "404 Not Found"    # Database doesn't exist
   of $Http409:
-    logDebug "409 - Conflict" # Document with same Id found
-    discard
+    logDebug "409 Conflict"     # Document with same Id found
   else:
     discard
 
@@ -371,31 +423,42 @@ proc destroy*(db: Database, id, rev: string) =
   let response = client.delete(path)
   case response.status
   of $Http200:
-    echo "200"
-    discard
+    logDebug "200 OK"           # Document successfully removed
   of $Http202:
-    echo "202"
-    discard
-  of $Http302:
-    echo "302"
-    discard
+    logDebug "202 Accepted"     # Request was accepted, but changes are not yet stored on disk
   of $Http400:
-    echo "400"
-    discard
+    logDebug "400 Bad Request"  # Invalid request body or parameters
   of $Http401:
-    echo "401"
-    discard
+    logDebug "401 Unauthorized" # Write privileges required
   of $Http404:
-    echo "404"
-    discard
+    logDebug "404 Not Found"    # Specified database or document ID doesn�t exists
   of $Http409:
-    echo "409"
-    discard
+    logDebug "409 Conflict"     # Specified revision is not the latest for target document
   else:
     raise newException(Exception, "Unable to delete document.")
 
-proc head(db: Database, id: string) =
-  discard
+proc head*(db: Database, id: string): DocumentHeadResponse =
+  ##[
+    Document retrieve info
+    http://docs.couchdb.org/en/latest/api/document/common.html#get--db-docid
+  ]##
+  let path = db.connection / db.name / id
+  let response = client.head(path)
+  let headers = response.headers
+  case response.status
+  of $Http200:
+    logDebug "200 OK"           # Document exists
+    result = newDocumentHeadResponse(id, parseInt(headers["Content-Length"]), headers["ETag"])
+  of $Http304:
+    logDebug "304 Not Modified" # Document wasn�t modified since specified revision"
+    discard
+  of $Http401:
+    logDebug "401 Unauthorized" # Read privilege required
+  of $Http404:
+    logDebug "404 Not Found"    # Document not found
+    discard
+  else:
+    raise newException(Exception, "Unable to get document.")
 
 proc bulk(db: Database, id: string) =
   # TODO: parameters
